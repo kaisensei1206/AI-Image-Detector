@@ -1,275 +1,218 @@
-const messageForm = document.querySelector(".prompt__form");
-const chatHistoryContainer = document.querySelector(".chats");
-const suggestionItems = document.querySelectorAll(".suggests__item");
+// Set the number of tags to display per page
+const tagsPerPage = 20;
 
-const themeToggleButton = document.getElementById("themeToggler");
-const clearChatButton = document.getElementById("deleteButton");
+// Event listener for the upload button
+document.getElementById('uploadButton').addEventListener('click', async () => {
+    // Elements and file handling
+    const fileInput = document.getElementById('imageInput');
+    const file = fileInput.files[0];
+    const imagePreview = document.getElementById('imagePreview');
+    const uploadModal = document.getElementById('uploadModal');
+    const uploadProgress = document.getElementById('uploadProgress');
 
-// State variables
-let currentUserMessage = null;
-let isGeneratingResponse = false;
+    // If no file is selected, show a toast message
+    if (!file) return showToast('Please select an image file first.');
 
-const GOOGLE_API_KEY = "YOUR_API_KEY";
-const API_REQUEST_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${GOOGLE_API_KEY}`;
+    // Preview the selected image
+    const reader = new FileReader();
+    reader.onload = e => imagePreview.src = e.target.result;
+    reader.readAsDataURL(file);
 
-// Load saved data from local storage
-const loadSavedChatHistory = () => {
-    const savedConversations = JSON.parse(localStorage.getItem("saved-api-chats")) || [];
-    const isLightTheme = localStorage.getItem("themeColor") === "light_mode";
+    // Imagga API credentials
+    const apiKey = 'YOUR_API_KEY';
+    const apiSecret = 'YOUR_API_SECRET';
+    const authHeader = 'Basic ' + btoa(`${apiKey}:${apiSecret}`);
 
-    document.body.classList.toggle("light_mode", isLightTheme);
-    themeToggleButton.innerHTML = isLightTheme ? '<i class="bx bx-moon"></i>' : '<i class="bx bx-sun"></i>';
+    // Prepare data for upload
+    const formData = new FormData();
+    formData.append('image', file);
 
-    chatHistoryContainer.innerHTML = '';
+    try {
+        // Show upload modal and reset progress bar
+        uploadModal.style.display = 'block';
+        uploadProgress.style.width = '0%';
 
-    // Iterate through saved chat history and display messages
-    savedConversations.forEach(conversation => {
-        // Display the user's message
-        const userMessageHtml = `
+        // Upload image to Imagga
+        const uploadResponse = await fetch('https://api.imagga.com/v2/uploads', {
+            method: 'POST',
+            headers: { 'Authorization': authHeader },
+            body: formData
+        });
 
-            <div class="message__content">
-                <img class="message__avatar" src="assets/profile.png" alt="User avatar">
-               <p class="message__text">${conversation.userMessage}</p>
-            </div>
-        
-        `;
+        if (!uploadResponse.ok) throw new Error('Upload failed.');
 
-        const outgoingMessageElement = createChatMessageElement(userMessageHtml, "message--outgoing");
-        chatHistoryContainer.appendChild(outgoingMessageElement);
+        // Track upload progress
+        const contentLength = +uploadResponse.headers.get('Content-Length');
+        const reader = uploadResponse.body.getReader();
+        let receivedLength = 0;
+        let chunks = [];
 
-        // Display the API response
-        const responseText = conversation.apiResponse?.candidates?.[0]?.content?.parts?.[0]?.text;
-        const parsedApiResponse = marked.parse(responseText); // Convert to HTML
-        const rawApiResponse = responseText; // Plain text version
+        // Read response stream and update progress
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            receivedLength += value.length;
+            uploadProgress.style.width = `${(receivedLength / contentLength) * 100}%`;
+        }
 
-        const responseHtml = `
-        
-           <div class="message__content">
-                <img class="message__avatar" src="assets/gemini.svg" alt="Gemini avatar">
-                <p class="message__text"></p>
-                <div class="message__loading-indicator hide">
-                    <div class="message__loading-bar"></div>
-                    <div class="message__loading-bar"></div>
-                    <div class="message__loading-bar"></div>
-                </div>
-            </div>
-            <span onClick="copyMessageToClipboard(this)" class="message__icon hide"><i class='bx bx-copy-alt'></i></span>
-        
-        `;
+        // Decode and parse upload response
+        const responseArray = new Uint8Array(receivedLength);
+        let position = 0;
+        for (const chunk of chunks) {
+            responseArray.set(chunk, position);
+            position += chunk.length;
+        }
 
-        const incomingMessageElement = createChatMessageElement(responseHtml, "message--incoming");
-        chatHistoryContainer.appendChild(incomingMessageElement);
+        const text = new TextDecoder('utf-8').decode(responseArray);
+        const { result: { upload_id } } = JSON.parse(text);
 
-        const messageTextElement = incomingMessageElement.querySelector(".message__text");
+        // Fetch color and tag analysis from Imagga
+        const [colorResult, tagsResult] = await Promise.all([
+            fetch(`https://api.imagga.com/v2/colors?image_upload_id=${upload_id}`, { headers: { 'Authorization': authHeader } }).then(res => res.json()),
+            fetch(`https://api.imagga.com/v2/tags?image_upload_id=${upload_id}`, { headers: { 'Authorization': authHeader } }).then(res => res.json()),
+        ]);
 
-        // Display saved chat without typing effect
-        showTypingEffect(rawApiResponse, parsedApiResponse, messageTextElement, incomingMessageElement, true); // 'true' skips typing
-    });
+        // Display the results
+        displayColors(colorResult.result.colors);
+        displayTags(tagsResult.result.tags);
+    } catch (error) {
+        console.error('Error:', error);
+        showToast('An error occurred while processing the image!');
+    } finally {
+        // Hide the upload modal after processing
+        uploadModal.style.display = 'none';
+    }
+});
 
-    document.body.classList.toggle("hide-header", savedConversations.length > 0);
-};
+// Function to display color analysis results
+const displayColors = colors => {
+    const colorsContainer = document.querySelector('.colors-container');
+    colorsContainer.innerHTML = ''; // Clear previous results
 
-// create a new chat message element
-const createChatMessageElement = (htmlContent, ...cssClasses) => {
-    const messageElement = document.createElement("div");
-    messageElement.classList.add("message", ...cssClasses);
-    messageElement.innerHTML = htmlContent;
-    return messageElement;
-}
-
-// Show typing effect
-const showTypingEffect = (rawText, htmlText, messageElement, incomingMessageElement, skipEffect = false) => {
-    const copyIconElement = incomingMessageElement.querySelector(".message__icon");
-    copyIconElement.classList.add("hide"); // Initially hide copy button
-
-    if (skipEffect) {
-        // Display content directly without typing
-        messageElement.innerHTML = htmlText;
-        hljs.highlightAll();
-        addCopyButtonToCodeBlocks();
-        copyIconElement.classList.remove("hide"); // Show copy button
-        isGeneratingResponse = false;
+    // If no colors are found, show an error message
+    if (![colors.background_colors, colors.foreground_colors, colors.image_colors].some(arr => arr.length)) {
+        colorsContainer.innerHTML = '<p class="error">Nothing to show...</p>';
         return;
     }
 
-    const wordsArray = rawText.split(' ');
-    let wordIndex = 0;
+    // Generate HTML sections for different color types
+    const generateColorSection = (title, colorData) => {
+        return `
 
-    const typingInterval = setInterval(() => {
-        messageElement.innerText += (wordIndex === 0 ? '' : ' ') + wordsArray[wordIndex++];
-        if (wordIndex === wordsArray.length) {
-            clearInterval(typingInterval);
-            isGeneratingResponse = false;
-            messageElement.innerHTML = htmlText;
-            hljs.highlightAll();
-            addCopyButtonToCodeBlocks();
-            copyIconElement.classList.remove("hide");
-        }
-    }, 75);
-};
-
-// Fetch API response based on user input
-const requestApiResponse = async (incomingMessageElement) => {
-    const messageTextElement = incomingMessageElement.querySelector(".message__text");
-
-    try {
-        const response = await fetch(API_REQUEST_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                contents: [{ role: "user", parts: [{ text: currentUserMessage }] }]
-            }),
-        });
-
-        const responseData = await response.json();
-        if (!response.ok) throw new Error(responseData.error.message);
-
-        const responseText = responseData?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!responseText) throw new Error("Invalid API response.");
-
-        const parsedApiResponse = marked.parse(responseText);
-        const rawApiResponse = responseText;
-
-        showTypingEffect(rawApiResponse, parsedApiResponse, messageTextElement, incomingMessageElement);
-
-        // Save conversation in local storage
-        let savedConversations = JSON.parse(localStorage.getItem("saved-api-chats")) || [];
-        savedConversations.push({
-            userMessage: currentUserMessage,
-            apiResponse: responseData
-        });
-        localStorage.setItem("saved-api-chats", JSON.stringify(savedConversations));
-    } catch (error) {
-        isGeneratingResponse = false;
-        messageTextElement.innerText = error.message;
-        messageTextElement.closest(".message").classList.add("message--error");
-    } finally {
-        incomingMessageElement.classList.remove("message--loading");
-    }
-};
-
-// Add copy button to code blocks
-const addCopyButtonToCodeBlocks = () => {
-    const codeBlocks = document.querySelectorAll('pre');
-    codeBlocks.forEach((block) => {
-        const codeElement = block.querySelector('code');
-        let language = [...codeElement.classList].find(cls => cls.startsWith('language-'))?.replace('language-', '') || 'Text';
-
-        const languageLabel = document.createElement('div');
-        languageLabel.innerText = language.charAt(0).toUpperCase() + language.slice(1);
-        languageLabel.classList.add('code__language-label');
-        block.appendChild(languageLabel);
-
-        const copyButton = document.createElement('button');
-        copyButton.innerHTML = `<i class='bx bx-copy'></i>`;
-        copyButton.classList.add('code__copy-btn');
-        block.appendChild(copyButton);
-
-        copyButton.addEventListener('click', () => {
-            navigator.clipboard.writeText(codeElement.innerText).then(() => {
-                copyButton.innerHTML = `<i class='bx bx-check'></i>`;
-                setTimeout(() => copyButton.innerHTML = `<i class='bx bx-copy'></i>`, 2000);
-            }).catch(err => {
-                console.error("Copy failed:", err);
-                alert("Unable to copy text!");
-            });
-        });
-    });
-};
-
-// Show loading animation during API request
-const displayLoadingAnimation = () => {
-    const loadingHtml = `
-
-        <div class="message__content">
-            <img class="message__avatar" src="assets/gemini.svg" alt="Gemini avatar">
-            <p class="message__text"></p>
-            <div class="message__loading-indicator">
-                <div class="message__loading-bar"></div>
-                <div class="message__loading-bar"></div>
-                <div class="message__loading-bar"></div>
+            <h3>${title}</h3>
+            <div class="results">
+                ${colorData.map(({ html_code, closest_palette_color, percent }) => `
+                    <div class="result-item" data-color="${html_code}">
+                        <div>
+                            <div class="color-box" style="background-color: ${html_code}" title="Color code: ${html_code}"></div>
+                            <p>${html_code}<span> - ${closest_palette_color}</span></p>
+                        </div>
+                        <div class="progress-bar">
+                            <span>${percent.toFixed(2)}%</span>
+                            <div class="progress" style="width: ${percent}%"></div>
+                        </div>
+                    </div> 
+                `).join('')}
             </div>
-        </div>
-        <span onClick="copyMessageToClipboard(this)" class="message__icon hide"><i class='bx bx-copy-alt'></i></span>
-    
-    `;
+        `;
+    };
 
-    const loadingMessageElement = createChatMessageElement(loadingHtml, "message--incoming", "message--loading");
-    chatHistoryContainer.appendChild(loadingMessageElement);
+    // Append generated color sections to the container
+    colorsContainer.innerHTML += generateColorSection('Background Colors', colors.background_colors);
+    colorsContainer.innerHTML += generateColorSection('Foreground Colors', colors.foreground_colors);
+    colorsContainer.innerHTML += generateColorSection('Image Colors', colors.image_colors);
 
-    requestApiResponse(loadingMessageElement);
-};
-
-// Copy message to clipboard
-const copyMessageToClipboard = (copyButton) => {
-    const messageContent = copyButton.parentElement.querySelector(".message__text").innerText;
-
-    navigator.clipboard.writeText(messageContent);
-    copyButton.innerHTML = `<i class='bx bx-check'></i>`; // Confirmation icon
-    setTimeout(() => copyButton.innerHTML = `<i class='bx bx-copy-alt'></i>`, 1000); // Revert icon after 1 second
-};
-
-// Handle sending chat messages
-const handleOutgoingMessage = () => {
-    currentUserMessage = messageForm.querySelector(".prompt__form-input").value.trim() || currentUserMessage;
-    if (!currentUserMessage || isGeneratingResponse) return; // Exit if no message or already generating response
-
-    isGeneratingResponse = true;
-
-    const outgoingMessageHtml = `
-    
-        <div class="message__content">
-            <img class="message__avatar" src="assets/profile.png" alt="User avatar">
-            <p class="message__text"></p>
-        </div>
-
-    `;
-
-    const outgoingMessageElement = createChatMessageElement(outgoingMessageHtml, "message--outgoing");
-    outgoingMessageElement.querySelector(".message__text").innerText = currentUserMessage;
-    chatHistoryContainer.appendChild(outgoingMessageElement);
-
-    messageForm.reset(); // Clear input field
-    document.body.classList.add("hide-header");
-    setTimeout(displayLoadingAnimation, 500); // Show loading animation after delay
-};
-
-// Toggle between light and dark themes
-themeToggleButton.addEventListener('click', () => {
-    const isLightTheme = document.body.classList.toggle("light_mode");
-    localStorage.setItem("themeColor", isLightTheme ? "light_mode" : "dark_mode");
-
-    // Update icon based on theme
-    const newIconClass = isLightTheme ? "bx bx-moon" : "bx bx-sun";
-    themeToggleButton.querySelector("i").className = newIconClass;
-});
-
-// Clear all chat history
-clearChatButton.addEventListener('click', () => {
-    if (confirm("Are you sure you want to delete all chat history?")) {
-        localStorage.removeItem("saved-api-chats");
-
-        // Reload chat history to reflect changes
-        loadSavedChatHistory();
-
-        currentUserMessage = null;
-        isGeneratingResponse = false;
-    }
-});
-
-// Handle click on suggestion items
-suggestionItems.forEach(suggestion => {
-    suggestion.addEventListener('click', () => {
-        currentUserMessage = suggestion.querySelector(".suggests__item-text").innerText;
-        handleOutgoingMessage();
+    // Add click functionality to copy color code to clipboard
+    document.querySelectorAll('.colors-container .result-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const colorCode = item.getAttribute('data-color');
+            navigator.clipboard.writeText(colorCode).then(() => showToast(`Copied: ${colorCode}`)).catch(() => showToast('Failed to copy color code!'));
+        });
     });
-});
 
-// Prevent default from submission and handle outgoing message
-messageForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    handleOutgoingMessage();
-});
+};
 
-// Load saved chat history on page load
-loadSavedChatHistory();
+// Function to display tags with pagination (See More)
+let allTags = [];
+let displayedTags = 0;
+
+const displayTags = tags => {
+    const tagsContainer = document.querySelector('.tags-container');
+    const resultList = tagsContainer.querySelector('.results');
+    const error = tagsContainer.querySelector('.error');
+    const seeMoreButton = document.getElementById('seeMoreButton');
+    const exportTagsButton = document.getElementById('exportTagsButton');
+
+    // Clear previous tags
+    if (resultList) {
+        resultList.innerHTML = '';
+    } else {
+        const resultListContainer = document.createElement('div');
+        resultListContainer.className = 'results';
+        tagsContainer.insertBefore(resultListContainer, seeMoreButton);
+    }
+
+    // Store all tags and initialize displayed tags count
+    allTags = tags;
+    displayedTags = 0;
+
+    // Function to show more tags when "See More" button is clicked
+    const showMoreTags = () => {
+        const tagsToShow = allTags.slice(displayedTags, displayedTags + tagsPerPage);
+        displayedTags += tagsToShow.length;
+
+        const tagsHTML = tagsToShow.map(({ tag: { en } }) => `
+        
+            <div class="result-item">
+                <p>${en}</p>
+            </div>
+        `).join('');
+
+        if (resultList) {
+            resultList.innerHTML += tagsHTML;
+        }
+
+        // Toggle visibility of error and buttons based on displayed tags
+        error.style.display = displayedTags > 0 ? 'none' : 'block';
+        seeMoreButton.style.display = displayedTags < allTags.length ? 'block' : 'none';
+        exportTagsButton.style.display = displayedTags > 0 ? 'block' : 'none';
+    };
+
+    showMoreTags(); // Initial load of tags
+
+    // Event listeners for "See More" and "Export Tags" buttons
+    seeMoreButton.addEventListener('click', showMoreTags);
+    exportTagsButton.addEventListener('click', exportTagsToFile);
+};
+
+// Function to export tags to a text file
+const exportTagsToFile = () => {
+    if (allTags.length === 0) {
+        showToast('No tags available to export!');
+        return;
+    }
+
+    // Convert tags to text and trigger download
+    const tagsText = allTags.map(({ tag: { en } }) => en).join('\n');
+    const blob = new Blob([tagsText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Tags.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+};
+
+// Function to show toast messages
+const showToast = message => {
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.classList.add('show'), 100); // Show toast
+    setTimeout(() => {
+        toast.classList.remove('show'); // Hide toast
+        setTimeout(() => document.body.removeChild(toast), 500);
+    }, 3000);
+};
